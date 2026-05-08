@@ -1,0 +1,309 @@
+{
+	"info": {
+		"name": "Billing Trial — Demo & Testing",
+		"description": "Full collection for testing the Refunds & Chargeback Lifecycle implementation.\n\nUsage:\n1. Run requests in folder order (Setup → Chargeback Flow → Dispute Resolution → Refund Flow)\n2. Update {{disputeId}} and {{refundId}} variables after creating them\n3. Use 'test-admin-1' header for admin endpoints, 'test-user-1' for user endpoints",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"variable": [
+		{ "key": "baseUrl", "value": "http://localhost:4000" },
+		{ "key": "userId", "value": "test-user-1" },
+		{ "key": "adminId", "value": "test-admin-1" },
+		{ "key": "disputeId", "value": "REPLACE_WITH_DISPUTE_ID" },
+		{ "key": "refundId", "value": "REPLACE_WITH_REFUND_ID" },
+		{ "key": "transactionId", "value": "an_txn_demo_001" }
+	],
+	"item": [
+		{
+			"name": "0 — Setup",
+			"item": [
+				{
+					"name": "0.1 Reset User State",
+					"request": {
+						"method": "POST",
+						"header": [{ "key": "content-type", "value": "application/json" }],
+						"url": "{{baseUrl}}/__simulator__/reset",
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"userId\": \"{{userId}}\"\n}"
+						}
+					}
+				},
+				{
+					"name": "0.2 Check Credits (before)",
+					"request": {
+						"method": "GET",
+						"header": [{ "key": "x-user-id", "value": "{{userId}}" }],
+						"url": "{{baseUrl}}/credits"
+					}
+				}
+			]
+		},
+		{
+			"name": "1 — Chargeback Flow",
+			"item": [
+				{
+					"name": "1.1 Simulate Rebill (create charge)",
+					"request": {
+						"method": "POST",
+						"header": [{ "key": "content-type", "value": "application/json" }],
+						"url": "{{baseUrl}}/__simulator__/card/rebill",
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"userId\": \"{{userId}}\",\n  \"plan\": \"STANDARD\",\n  \"amountCents\": 2000\n}"
+						}
+					}
+				},
+				{
+					"name": "1.2 Check Credits (after charge)",
+					"request": {
+						"method": "GET",
+						"header": [{ "key": "x-user-id", "value": "{{userId}}" }],
+						"url": "{{baseUrl}}/credits"
+					}
+				},
+				{
+					"name": "1.3 Trigger Chargeback",
+					"request": {
+						"method": "POST",
+						"header": [{ "key": "content-type", "value": "application/json" }],
+						"url": "{{baseUrl}}/__simulator__/card/chargeback",
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"userId\": \"{{userId}}\",\n  \"originalTransactionId\": \"{{transactionId}}\",\n  \"amountCents\": 2000,\n  \"reason\": \"fraudulent\"\n}"
+						}
+					}
+				},
+				{
+					"name": "1.4 Check Credits (after chargeback — should decrease)",
+					"request": {
+						"method": "GET",
+						"header": [{ "key": "x-user-id", "value": "{{userId}}" }],
+						"url": "{{baseUrl}}/credits"
+					}
+				},
+				{
+					"name": "1.5 List Disputes (verify dispute created)",
+					"request": {
+						"method": "GET",
+						"header": [{ "key": "x-user-id", "value": "{{adminId}}" }],
+						"url": "{{baseUrl}}/admin/disputes"
+					}
+				},
+				{
+					"name": "1.6 Replay Same Chargeback (idempotency test)",
+					"request": {
+						"method": "POST",
+						"header": [{ "key": "content-type", "value": "application/json" }],
+						"url": "{{baseUrl}}/__simulator__/card/chargeback",
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"userId\": \"{{userId}}\",\n  \"originalTransactionId\": \"{{transactionId}}\",\n  \"amountCents\": 2000,\n  \"reason\": \"fraudulent\"\n}"
+						}
+					}
+				},
+				{
+					"name": "1.7 List Disputes (still only 1 — dedup worked)",
+					"request": {
+						"method": "GET",
+						"header": [{ "key": "x-user-id", "value": "{{adminId}}" }],
+						"url": "{{baseUrl}}/admin/disputes"
+					}
+				}
+			]
+		},
+		{
+			"name": "2 — Dispute Resolution (WON)",
+			"item": [
+				{
+					"name": "2.1 Get Dispute Detail",
+					"request": {
+						"method": "GET",
+						"header": [{ "key": "x-user-id", "value": "{{adminId}}" }],
+						"url": "{{baseUrl}}/admin/disputes/{{disputeId}}"
+					}
+				},
+				{
+					"name": "2.2 Submit Evidence",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "x-user-id", "value": "{{adminId}}" },
+							{ "key": "content-type", "value": "application/json" }
+						],
+						"url": "{{baseUrl}}/admin/disputes/{{disputeId}}/evidence",
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"evidenceType\": \"access_log\",\n  \"content\": \"User logged in 47 times between Jan-Apr 2026. Last job submitted March 28. Activity clearly demonstrates legitimate usage of the service.\"\n}"
+						}
+					}
+				},
+				{
+					"name": "2.3 Mark as WON",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "x-user-id", "value": "{{adminId}}" },
+							{ "key": "content-type", "value": "application/json" }
+						],
+						"url": "{{baseUrl}}/admin/disputes/{{disputeId}}/outcome",
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"outcome\": \"WON\"\n}"
+						}
+					}
+				},
+				{
+					"name": "2.4 Check Credits (should be restored)",
+					"request": {
+						"method": "GET",
+						"header": [{ "key": "x-user-id", "value": "{{userId}}" }],
+						"url": "{{baseUrl}}/credits"
+					}
+				},
+				{
+					"name": "2.5 Try Invalid Transition WON→LOST (should 400)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "x-user-id", "value": "{{adminId}}" },
+							{ "key": "content-type", "value": "application/json" }
+						],
+						"url": "{{baseUrl}}/admin/disputes/{{disputeId}}/outcome",
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"outcome\": \"LOST\"\n}"
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "3 — Dispute Resolution (LOST)",
+			"item": [
+				{
+					"name": "3.1 Create New Chargeback (for LOST test)",
+					"request": {
+						"method": "POST",
+						"header": [{ "key": "content-type", "value": "application/json" }],
+						"url": "{{baseUrl}}/__simulator__/card/chargeback",
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"userId\": \"{{userId}}\",\n  \"originalTransactionId\": \"an_txn_demo_002\",\n  \"amountCents\": 3000,\n  \"reason\": \"product_not_received\"\n}"
+						}
+					}
+				},
+				{
+					"name": "3.2 List Disputes (find the new one)",
+					"request": {
+						"method": "GET",
+						"header": [{ "key": "x-user-id", "value": "{{adminId}}" }],
+						"url": "{{baseUrl}}/admin/disputes"
+					}
+				},
+				{
+					"name": "3.3 Mark as LOST (update disputeId first!)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "x-user-id", "value": "{{adminId}}" },
+							{ "key": "content-type", "value": "application/json" }
+						],
+						"url": "{{baseUrl}}/admin/disputes/{{disputeId}}/outcome",
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"outcome\": \"LOST\"\n}"
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "4 — Refund Flow (PAYMENT)",
+			"item": [
+				{
+					"name": "4.1 Simulate Rebill (create charge to refund)",
+					"request": {
+						"method": "POST",
+						"header": [{ "key": "content-type", "value": "application/json" }],
+						"url": "{{baseUrl}}/__simulator__/card/rebill",
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"userId\": \"{{userId}}\",\n  \"plan\": \"STANDARD\",\n  \"amountCents\": 1000\n}"
+						}
+					}
+				},
+				{
+					"name": "4.2 Create PAYMENT Refund Request (as user)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "x-user-id", "value": "{{userId}}" },
+							{ "key": "content-type", "value": "application/json" }
+						],
+						"url": "{{baseUrl}}/refunds",
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"type\": \"PAYMENT\",\n  \"amount\": 1000,\n  \"reason\": \"Service not as described\",\n  \"gatewayType\": \"AUTHORIZE_NET\",\n  \"originalGatewayTransactionId\": \"an_txn_refund_001\"\n}"
+						}
+					}
+				},
+				{
+					"name": "4.3 Approve Refund (as admin)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{ "key": "x-user-id", "value": "{{adminId}}" },
+							{ "key": "content-type", "value": "application/json" }
+						],
+						"url": "{{baseUrl}}/refunds/admin/{{refundId}}/approve",
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"notes\": \"Approved — legitimate refund request\"\n}"
+						}
+					}
+				},
+				{
+					"name": "4.4 Process Refund (as admin)",
+					"request": {
+						"method": "POST",
+						"header": [{ "key": "x-user-id", "value": "{{adminId}}" }],
+						"url": "{{baseUrl}}/refunds/admin/{{refundId}}/process"
+					}
+				},
+				{
+					"name": "4.5 List Refunds (verify PROCESSED + gatewayRefundId)",
+					"request": {
+						"method": "GET",
+						"header": [{ "key": "x-user-id", "value": "{{adminId}}" }],
+						"url": "{{baseUrl}}/refunds/admin"
+					}
+				},
+				{
+					"name": "4.6 Try Process Again (should reject — already PROCESSED)",
+					"request": {
+						"method": "POST",
+						"header": [{ "key": "x-user-id", "value": "{{adminId}}" }],
+						"url": "{{baseUrl}}/refunds/admin/{{refundId}}/process"
+					}
+				}
+			]
+		},
+		{
+			"name": "5 — Charge Failure (No-Dunning Policy)",
+			"item": [
+				{
+					"name": "5.1 Simulate Charge Failure (immediate cancel)",
+					"request": {
+						"method": "POST",
+						"header": [{ "key": "content-type", "value": "application/json" }],
+						"url": "{{baseUrl}}/__simulator__/card/charge-failure",
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"userId\": \"{{userId}}\",\n  \"reason\": \"declined_insufficient_funds\"\n}"
+						}
+					}
+				}
+			]
+		}
+	]
+}

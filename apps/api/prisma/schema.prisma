@@ -1,0 +1,430 @@
+// Payment & Billing System — Prisma Schema
+//
+// Architecture:
+//   - Double-entry Ledger (ASSET/LIABILITY/REVENUE/EXPENSE/EQUITY accounts)
+//   - Flat Credits system (parallel to the ledger, simpler balance tracking)
+//   - Gateway-agnostic Subscription tracking (AuthorizeNet + Solana)
+//   - ChargeRecord log for auto-populating refund transaction IDs
+//   - ProcessedWebhook dedup table for atomic webhook idempotency
+//   - Refund workflow: create → approve → process (both CREDITS and PAYMENT types)
+//   - Dispute + DisputeEvidence for full chargeback lifecycle (OPEN → WON|LOST)
+//   - BillingConfig key/value table for runtime-configurable parameters
+//
+// Money is stored as integer cents or integer credits — never as Float or Decimal.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum UserRole {
+  USER
+  ADMIN
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  INACTIVE
+  CANCELED
+  TRIALING
+}
+
+enum SubscriptionPlan {
+  BASIC
+  STANDARD
+  PREMIUM
+}
+
+enum CreditTransactionType {
+  PURCHASE
+  BONUS
+  USAGE
+  REFUND
+  ADJUSTMENT
+}
+
+enum LedgerAccountType {
+  ASSET
+  LIABILITY
+  REVENUE
+  EXPENSE
+  EQUITY
+}
+
+enum LedgerEntryType {
+  DEBIT
+  CREDIT
+}
+
+enum LedgerTransactionStatus {
+  PENDING
+  ESCROWED
+  COMPLETED
+  REFUNDED
+  CANCELED
+}
+
+enum PaymentGateway {
+  AUTHORIZE_NET
+  SOLANA
+}
+
+enum RefundType {
+  CREDITS
+  PAYMENT
+}
+
+enum RefundStatus {
+  PENDING
+  APPROVED
+  DENIED
+  PROCESSED
+}
+
+enum DisputeStatus {
+  OPEN
+  EVIDENCE_SUBMITTED
+  WON
+  LOST
+}
+
+// ---------------------------------------------------------------------------
+// Users
+// ---------------------------------------------------------------------------
+
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  name      String?
+  role      UserRole @default(USER)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  subscription       Subscription?
+  credits            Credits?
+  ledgerAccounts     LedgerAccount[]
+  ledgerTransactions LedgerTransaction[]
+  vaultedCards       VaultedCard[]
+  gatewayCustomers   GatewayCustomer[]
+  refundRequests     RefundRequest[]     @relation("UserRefundRequests")
+  refundsReviewed    RefundRequest[]     @relation("RefundReviewer")
+  disputesOpened     Dispute[]           @relation("DisputeUser")
+  chargeRecords      ChargeRecord[]
+
+  @@map("users")
+}
+
+// ---------------------------------------------------------------------------
+// Plans & Subscriptions
+// ---------------------------------------------------------------------------
+
+model Plan {
+  id           String           @id @default(cuid())
+  key          SubscriptionPlan @unique
+  displayName  String           @map("display_name")
+  priceCents   Int              @map("price_cents")
+  monthlyCredits Int            @map("monthly_credits")
+  description  String?
+  createdAt    DateTime         @default(now()) @map("created_at")
+  updatedAt    DateTime         @updatedAt @map("updated_at")
+
+  @@map("plans")
+}
+
+model Subscription {
+  id                 String             @id @default(cuid())
+  userId             String             @unique @map("user_id")
+  status             SubscriptionStatus @default(INACTIVE)
+  plan               SubscriptionPlan   @default(BASIC)
+  currentPeriodStart DateTime?          @map("current_period_start")
+  currentPeriodEnd   DateTime?          @map("current_period_end")
+  cancelAtPeriodEnd  Boolean            @default(false) @map("cancel_at_period_end")
+  canceledAt         DateTime?          @map("canceled_at")
+  createdAt          DateTime           @default(now()) @map("created_at")
+  updatedAt          DateTime           @updatedAt @map("updated_at")
+
+  user                User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  gatewaySubscription GatewaySubscription?
+
+  @@index([status])
+  @@index([currentPeriodEnd])
+  @@map("subscriptions")
+}
+
+// Gateway-agnostic subscription tracking.
+// gatewayData holds gateway-specific fields:
+//   AuthorizeNet: { profileId, arbSubscriptionId }
+//   Solana:       { walletAddress, lastTxHash, subscriptionPda }
+model GatewaySubscription {
+  id                    String         @id @default(cuid())
+  subscriptionId        String         @unique @map("subscription_id")
+  gatewayType           PaymentGateway @map("gateway_type")
+  gatewaySubscriptionId String?        @map("gateway_subscription_id")
+  gatewayCustomerId     String?        @map("gateway_customer_id")
+  gatewayData           Json?          @map("gateway_data")
+  createdAt             DateTime       @default(now()) @map("created_at")
+  updatedAt             DateTime       @updatedAt @map("updated_at")
+
+  subscription Subscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+
+  @@index([gatewayType, gatewaySubscriptionId])
+  @@map("gateway_subscriptions")
+}
+
+model GatewayCustomer {
+  id                String         @id @default(cuid())
+  userId            String         @map("user_id")
+  gateway           PaymentGateway
+  gatewayCustomerId String         @map("gateway_customer_id")
+  createdAt         DateTime       @default(now()) @map("created_at")
+  updatedAt         DateTime       @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, gateway])
+  @@unique([gateway, gatewayCustomerId])
+  @@map("gateway_customers")
+}
+
+model VaultedCard {
+  id         String   @id @default(cuid())
+  userId     String   @map("user_id")
+  last4      String
+  brand      String
+  expMonth   Int      @map("exp_month")
+  expYear    Int      @map("exp_year")
+  isDefault  Boolean  @default(false) @map("is_default")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("vaulted_cards")
+}
+
+// ---------------------------------------------------------------------------
+// Credits (simple flat balance + transaction log)
+// Idempotency is enforced via a JSONB lookup on metadata.idempotencyKey —
+// matching the production pattern exactly.
+// ---------------------------------------------------------------------------
+
+model Credits {
+  id        String   @id @default(cuid())
+  userId    String   @unique @map("user_id")
+  balance   Int      @default(0)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user         User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  transactions CreditTransaction[]
+
+  @@map("credits")
+}
+
+model CreditTransaction {
+  id          String                @id @default(cuid())
+  creditsId   String                @map("credits_id")
+  amount      Int
+  type        CreditTransactionType
+  description String?
+  metadata    Json?
+  createdAt   DateTime              @default(now()) @map("created_at")
+
+  credits Credits @relation(fields: [creditsId], references: [id], onDelete: Cascade)
+
+  @@index([creditsId, createdAt])
+  @@map("credit_transactions")
+}
+
+// ---------------------------------------------------------------------------
+// Ledger (double-entry accounting)
+// ---------------------------------------------------------------------------
+
+model LedgerAccount {
+  id          String            @id @default(cuid())
+  userId      String            @map("user_id")
+  accountType LedgerAccountType @map("account_type")
+  balance     Int               @default(0)
+  createdAt   DateTime          @default(now()) @map("created_at")
+  updatedAt   DateTime          @updatedAt @map("updated_at")
+
+  user    User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  entries LedgerEntry[]
+
+  @@unique([userId, accountType])
+  @@index([userId])
+  @@map("ledger_accounts")
+}
+
+model LedgerTransaction {
+  id               String                  @id @default(cuid())
+  transactionId    String                  @map("transaction_id")
+  userId           String?                 @map("user_id")
+  description      String
+  status           LedgerTransactionStatus @default(COMPLETED)
+  metadata         Json?
+  idempotencyKey   String?                 @unique @map("idempotency_key")  // defense-in-depth dedup
+  createdAt        DateTime                @default(now()) @map("created_at")
+  updatedAt        DateTime                @updatedAt @map("updated_at")
+
+  entries LedgerEntry[]
+  user    User?         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, status])
+  @@index([transactionId])
+  @@index([createdAt])
+  @@map("ledger_transactions")
+}
+
+model LedgerEntry {
+  id                  String          @id @default(cuid())
+  ledgerTransactionId String          @map("ledger_transaction_id")
+  accountId           String          @map("account_id")
+  entryType           LedgerEntryType @map("entry_type")
+  amount              Int
+  createdAt           DateTime        @default(now()) @map("created_at")
+
+  account     LedgerAccount     @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  transaction LedgerTransaction @relation(fields: [ledgerTransactionId], references: [id], onDelete: Cascade)
+
+  @@index([ledgerTransactionId])
+  @@index([accountId])
+  @@map("ledger_entries")
+}
+
+// ---------------------------------------------------------------------------
+// Charge records — log of every settled charge event across all gateways.
+// Used to auto-populate originalGatewayTransactionId on refund creation.
+// ---------------------------------------------------------------------------
+
+model ChargeRecord {
+  id                   String          @id @default(cuid())
+  userId               String          @map("user_id")
+  gatewayType          PaymentGateway  @map("gateway_type")
+  gatewayTransactionId String          @map("gateway_transaction_id")
+  amountCents          Int             @map("amount_cents")
+  plan                 SubscriptionPlan?
+  createdAt            DateTime        @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([gatewayType, gatewayTransactionId])
+  @@index([userId, gatewayType, createdAt])
+  @@map("charge_records")
+}
+
+// ---------------------------------------------------------------------------
+// Webhook dedup
+// Single source of truth for "has this webhook event already been processed."
+// The id is the gateway's own event ID (e.g. Authorize.net notification ID or
+// Solana tx hash) so a duplicate insert hits the unique constraint (P2002).
+// ---------------------------------------------------------------------------
+
+model ProcessedWebhook {
+  id          String   @id                    // gateway event id / tx hash
+  source      String                           // "authorize_net" or "solana"
+  eventType   String   @map("event_type")
+  processedAt DateTime @default(now()) @map("processed_at")
+
+  @@index([source, eventType])
+  @@index([processedAt])
+  @@map("processed_webhooks")
+}
+
+// ---------------------------------------------------------------------------
+// Refunds — three-step admin workflow: create → approve → process.
+// PAYMENT refunds execute via gateway adapter + atomic ledger reversal.
+// CREDITS refunds restore balance via CreditsService.refundCredits.
+// ---------------------------------------------------------------------------
+
+model RefundRequest {
+  id              String       @id @default(cuid())
+  userId          String       @map("user_id")
+  type            RefundType
+  amount          Int                                  // cents for PAYMENT, credits for CREDITS
+  reason          String
+  status          RefundStatus @default(PENDING)
+  reviewedBy      String?      @map("reviewed_by")
+  reviewedAt      DateTime?    @map("reviewed_at")
+  reviewNotes     String?      @map("review_notes")
+  paymentRefundId             String?      @map("payment_refund_id") // set by gateway execution
+  gatewayType                 PaymentGateway? @map("gateway_type")   // which gateway to execute against
+  originalGatewayTransactionId String?     @map("original_gateway_transaction_id") // original charge txn id for refundCharge
+  processAttempts  Int          @default(0)  @map("process_attempts") // how many times process was attempted
+  lastProcessError String?      @map("last_process_error")           // last error message from process attempt
+  createdAt       DateTime     @default(now()) @map("created_at")
+  updatedAt       DateTime     @updatedAt @map("updated_at")
+
+  user     User  @relation("UserRefundRequests", fields: [userId], references: [id], onDelete: Cascade)
+  reviewer User? @relation("RefundReviewer", fields: [reviewedBy], references: [id])
+
+  @@index([userId, status])
+  @@index([status, createdAt])
+  @@map("refund_requests")
+}
+
+// ---------------------------------------------------------------------------
+// Disputes — full OPEN → EVIDENCE_SUBMITTED → WON | LOST lifecycle.
+// Created by the chargeback.received webhook handler atomically.
+// WON: reversal-of-reversal + credits restore. LOST: fee recorded as EXPENSE.
+// ---------------------------------------------------------------------------
+
+model Dispute {
+  id                    String        @id @default(cuid())
+  userId                String        @map("user_id")
+  gateway               PaymentGateway
+  gatewayDisputeId      String        @unique @map("gateway_dispute_id")  // e.g. AN notification id
+  originalTransactionId String        @map("original_transaction_id")     // the payment being disputed
+  amount                Int                                               // disputed amount in cents
+  reason                String?
+  status                DisputeStatus @default(OPEN)
+  openedAt              DateTime      @default(now()) @map("opened_at")
+  resolvedAt            DateTime?     @map("resolved_at")
+  ledgerReversalTxnId   String?       @map("ledger_reversal_txn_id")      // the reversal this dispute caused
+  createdAt             DateTime      @default(now()) @map("created_at")
+  updatedAt             DateTime      @updatedAt @map("updated_at")
+
+  user     User              @relation("DisputeUser", fields: [userId], references: [id], onDelete: Cascade)
+  evidence DisputeEvidence[]
+
+  @@index([userId, status])
+  @@index([status, openedAt])
+  @@map("disputes")
+}
+
+model DisputeEvidence {
+  id          String   @id @default(cuid())
+  disputeId   String   @map("dispute_id")
+  submittedBy String   @map("submitted_by")   // admin user id
+  evidenceType String  @map("evidence_type")   // "access_log" | "comms" | "terms" | "other"
+  content     String                           // free text
+  metadata    Json?
+  submittedAt DateTime @default(now()) @map("submitted_at")
+
+  dispute Dispute @relation(fields: [disputeId], references: [id], onDelete: Cascade)
+
+  @@index([disputeId])
+  @@map("dispute_evidence")
+}
+
+// ---------------------------------------------------------------------------
+// Billing configuration — runtime-configurable key/value parameters.
+// Avoids hardcoding values like chargeback fees that vary by processor.
+// ---------------------------------------------------------------------------
+
+model BillingConfig {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("billing_config")
+}

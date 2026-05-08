@@ -1,0 +1,18 @@
+node_modules/
+dist/
+build/
+.next/
+.turbo/
+*.log
+.env
+.env.local
+coverage/
+.DS_Store
+Thumbs.db
+*.tsbuildinfo
+prisma/generated/
+
+# Compiled seed (seed.ts is run via ts-node, never compiled)
+apps/api/prisma/seed.js
+apps/api/prisma/seed.d.ts
+apps/api/prisma/seed.js.map

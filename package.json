@@ -1,0 +1,36 @@
+{
+  "name": "payment-billing-system",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Production-grade payment and billing system with double-entry ledger, chargeback handling, and multi-gateway support",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "setup": "npm install && npm run db:migrate -w @billing/api && npm run db:seed -w @billing/api",
+    "dev": "npm-run-all --parallel dev:api dev:web",
+    "dev:api": "npm run dev -w @billing/api",
+    "dev:web": "npm run dev -w @billing/web",
+    "build": "npm-run-all build:ui build:api build:web",
+    "build:ui": "npm run build -w @billing/ui",
+    "build:api": "npm run build -w @billing/api",
+    "build:web": "npm run build -w @billing/web",
+    "test": "npm run test -w @billing/api",
+    "lint": "npm-run-all lint:api lint:web",
+    "lint:api": "npm run lint -w @billing/api",
+    "lint:web": "npm run lint -w @billing/web",
+    "db:migrate": "npm run db:migrate -w @billing/api",
+    "db:seed": "npm run db:seed -w @billing/api",
+    "db:reset": "npm run db:reset -w @billing/api"
+  },
+  "engines": {
+    "node": ">=20.0.0",
+    "npm": ">=10.0.0"
+  },
+  "devDependencies": {
+    "npm-run-all": "^4.1.5",
+    "typescript": "^5.5.4",
+    "prettier": "^3.3.3"
+  }
+}
